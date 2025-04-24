@@ -1,0 +1,7 @@
+{
+  "use_enhanced_parsers": true,
+  "nlp_settings": {
+    "model": "en_core_web_sm",
+    "min_confidence": 0.7
+  }
+}
