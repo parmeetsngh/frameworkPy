@@ -31,7 +31,8 @@ try:
         EnhancedDocxParser,
         EnhancedExcelParser,
         NLPTestCaseGenerator,
-        TraceabilityReporter
+        TraceabilityReporter,
+        LLMTestCaseGenerator
     )
 
     EXTENSIONS_AVAILABLE = True
@@ -107,6 +108,30 @@ def parse_arguments():
         help="Path to configuration file (JSON)"
     )
 
+    parser.add_argument(
+        "--use-llm",
+        action="store_true",
+        help="Enable LLM-based test case generation"
+    )
+
+    parser.add_argument(
+        "--llm-api-key",
+        help="API key for the LLM service"
+    )
+
+    parser.add_argument(
+        "--llm-model",
+        default="gpt-4",
+        help="LLM model to use for test generation (default: gpt-4)"
+    )
+
+    parser.add_argument(
+        "--llm-temperature",
+        type=float,
+        default=0.7,
+        help="Temperature setting for LLM generation (default: 0.7)"
+    )
+
     return parser.parse_args()
 
 
@@ -154,6 +179,19 @@ def enhance_framework(framework, options):
         except Exception as e:
             logging.error(f"Error initializing NLP generator: {e}")
 
+            # Add LLM capabilities for test generation
+    if options.get("use_llm", False):
+        try:
+            llm_client = LLMTestCaseGenerator(
+                api_key=options.get("llm_api_key"),
+                model=options.get("llm_model", "gpt-4"),
+                temperature=options.get("llm_temperature", 0.7)
+            )
+            enhanced_framework.llm_generator = llm_client
+            logging.info("LLM test case generator initialized successfully")
+        except Exception as e:
+            logging.error(f"Error initializing LLM generator: {e}")
+
     return enhanced_framework
 
 
@@ -180,10 +218,14 @@ def main():
     framework = TestAutomationFramework(args.story_folder, args.context_folder, args.output_dir)
 
     # Enhance framework if needed
-    if args.use_nlp or args.generate_reports:
+    if args.use_nlp or args.generate_reports or args.use_llm:
         options = {
             "use_nlp": args.use_nlp,
-            "generate_reports": args.generate_reports
+            "generate_reports": args.generate_reports,
+            "use_llm": args.use_llm,
+            "llm_api_key": args.llm_api_key,
+            "llm_model": args.llm_model,
+            "llm_temperature": args.llm_temperature
         }
         framework = enhance_framework(framework, options)
 

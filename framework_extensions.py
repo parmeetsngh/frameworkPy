@@ -11,6 +11,7 @@ import logging
 from typing import List, Dict, Optional, Set
 from pathlib import Path
 import pandas as pd
+import requests
 
 # Note: These imports would need to be installed in a real implementation
 # pip install python-docx pandas openpyxl nltk spacy gensim
@@ -485,3 +486,138 @@ class TraceabilityReporter:
 
         except Exception as e:
             logging.error(f"Error writing HTML report: {e}")
+
+
+class LLMTestCaseGenerator:
+    """Class to generate test cases using an LLM API"""
+
+    def __init__(self, api_key, model="gpt-4", temperature=0.7):
+        self.api_key = api_key
+        self.model = model
+        self.temperature = temperature
+        # Updated to use the completions endpoint for newer OpenAI models
+        self.api_url = "https://api.openai.com/v1/chat/completions"
+
+    def generate_test_cases(self, context_data):
+        """Generate test cases using the LLM.
+
+        Args:
+            context_data (dict): Input data for generating test cases.
+
+        Returns:
+            list: Generated test cases.
+        """
+        try:
+            prompt = self.format_prompt(context_data)
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+
+            # Updated payload format for chat completions API
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": self.temperature,
+                "max_tokens": 1500
+            }
+
+            response = requests.post(self.api_url, headers=headers, json=payload)
+            response.raise_for_status()
+
+            result = response.json()
+            # Updated to handle the chat completions API response format
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            test_cases = content.split("\n")
+
+            # Process and structure the test cases
+            processed_cases = []
+            current_case = None
+
+            for line in test_cases:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Check if this line starts a new test case
+                if line.startswith("Test Case") or line.startswith("Scenario:"):
+                    if current_case:
+                        processed_cases.append(current_case)
+                    current_case = {"name": line, "steps": []}
+                elif current_case and (line.startswith("Given") or line.startswith("When") or line.startswith(
+                        "Then") or line.startswith("And")):
+                    # This is a step
+                    step_type, description = line.split(" ", 1)
+                    current_case["steps"].append({"type": step_type, "description": description.strip()})
+                elif current_case:
+                    # This is additional info for the current case
+                    if "description" not in current_case:
+                        current_case["description"] = line
+                    else:
+                        current_case["description"] += "\n" + line
+
+            # Add the last test case if there is one
+            if current_case:
+                processed_cases.append(current_case)
+
+            return processed_cases or [self._create_fallback_test_case()]
+
+        except Exception as e:
+            logging.error(f"Error generating test cases: {e}")
+            return [self._create_fallback_test_case()]
+
+    def format_prompt(self, context_data):
+        """Format the input data into a prompt for the LLM.
+
+        Args:
+            context_data (dict): Input data for generating test cases.
+
+        Returns:
+            str: Formatted prompt.
+        """
+        requirements = context_data.get("requirements", [])
+        scenarios = context_data.get("scenarios", [])
+        additional_context = context_data.get("additional_context", "")
+
+        prompt = "Generate test cases in Gherkin format based on the following requirements and scenarios:\n\n"
+
+        if requirements:
+            prompt += "Requirements:\n"
+            for idx, req in enumerate(requirements, 1):
+                prompt += f"{idx}. {req}\n"
+            prompt += "\n"
+
+        if scenarios:
+            prompt += "Scenarios:\n"
+            for idx, scenario in enumerate(scenarios, 1):
+                prompt += f"{idx}. {scenario}\n"
+            prompt += "\n"
+
+        if additional_context:
+            prompt += f"Additional Context:\n{additional_context}\n\n"
+
+        prompt += """For each test case, include:
+1. A descriptive name
+2. Gherkin steps (Given, When, Then, And)
+3. Make steps detailed and specific
+
+Format your response as follows:
+Scenario: [Test Case Name]
+Given [precondition]
+When [action]
+Then [expected result]
+And [additional verification if needed]
+"""
+        return prompt
+
+    def _create_fallback_test_case(self):
+        """Create a fallback test case when generation fails"""
+        return {
+            "name": "Basic Test Case",
+            "description": "This is a fallback test case created when LLM generation failed.",
+            "steps": [
+                {"type": "Given", "description": "the system is ready"},
+                {"type": "When", "description": "the user performs an action"},
+                {"type": "Then", "description": "the system responds correctly"}
+            ]
+        }
