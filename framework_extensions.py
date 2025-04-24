@@ -489,17 +489,66 @@ class TraceabilityReporter:
 
 
 class LLMTestCaseGenerator:
-    """Class to generate test cases using an LLM API"""
+    """Class to generate test cases using Azure OpenAI"""
 
-    def __init__(self, api_key, model="gpt-4", temperature=0.7):
+    def __init__(self, api_key, model="gpt-4o", temperature=0.2):
         self.api_key = api_key
         self.model = model
         self.temperature = temperature
-        # Updated to use the completions endpoint for newer OpenAI models
-        self.api_url = "https://api.openai.com/v1/chat/completions"
+        # Azure endpoint configuration
+        self.api_url = "https://llm-test-automation.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview"
+        self.headers = {"api-key": api_key, "Content-Type": "application/json"}
+
+    def call_azure_openai(self, messages, max_retries=5, base_wait=2):
+        """Call Azure OpenAI API with retry logic"""
+        import random
+        import time
+        from requests.exceptions import HTTPError
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    self.api_url,
+                    headers=self.headers,
+                    json={
+                        "messages": messages,
+                        "temperature": self.temperature,
+                        "top_p": 1.0,
+                        "frequency_penalty": 0,
+                        "presence_penalty": 0,
+                        "max_tokens": 4000
+                    }
+                )
+
+                # Check for rate limit before raising an exception
+                if response.status_code == 429:
+                    wait_time = base_wait * (2 ** attempt) + (random.uniform(0, 1))  # Add jitter
+                    logging.warning(
+                        f"Rate limit hit (429). Retrying in {wait_time:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]["content"]
+
+            except HTTPError as http_err:
+                if response.status_code == 429:
+                    wait_time = base_wait * (2 ** attempt) + (random.uniform(0, 1))
+                    logging.warning(
+                        f"Rate limit hit (429). Retrying in {wait_time:.2f} seconds... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    logging.error(f"HTTP error: {http_err}")
+                    raise
+            except Exception as e:
+                logging.error(f"Unexpected error in OpenAI call: {e}")
+                raise
+
+        raise Exception("Max retries exceeded. OpenAI API is still rate limiting.")
 
     def generate_test_cases(self, context_data):
         """Generate test cases using the LLM.
+        This method matches the expected signature in the framework.
 
         Args:
             context_data (dict): Input data for generating test cases.
@@ -508,107 +557,92 @@ class LLMTestCaseGenerator:
             list: Generated test cases.
         """
         try:
-            prompt = self.format_prompt(context_data)
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
+            # Extract data from context_data
+            requirements = context_data.get("requirements", [])
+            scenarios = context_data.get("scenarios", [])
+            additional_context = context_data.get("additional_context", "")
 
-            # Updated payload format for chat completions API
-            payload = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.temperature,
-                "max_tokens": 1500
-            }
+            # Construct the prompt
+            prompt = f"""
+            Generate test cases in Gherkin format based on the following requirements and scenarios:
 
-            response = requests.post(self.api_url, headers=headers, json=payload)
-            response.raise_for_status()
+            Requirements:
+            {' '.join(requirements)}
 
-            result = response.json()
-            # Updated to handle the chat completions API response format
-            content = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            test_cases = content.split("\n")
+            Scenarios:
+            {' '.join(scenarios)}
 
-            # Process and structure the test cases
-            processed_cases = []
-            current_case = None
+            Additional Context:
+            {additional_context}
 
-            for line in test_cases:
-                line = line.strip()
-                if not line:
-                    continue
+            For each test case, include:
+            1. A descriptive name
+            2. Gherkin steps (Given, When, Then, And)
+            3. Make steps detailed and specific
 
-                # Check if this line starts a new test case
-                if line.startswith("Test Case") or line.startswith("Scenario:"):
-                    if current_case:
-                        processed_cases.append(current_case)
-                    current_case = {"name": line, "steps": []}
-                elif current_case and (line.startswith("Given") or line.startswith("When") or line.startswith(
-                        "Then") or line.startswith("And")):
-                    # This is a step
-                    step_type, description = line.split(" ", 1)
-                    current_case["steps"].append({"type": step_type, "description": description.strip()})
-                elif current_case:
-                    # This is additional info for the current case
-                    if "description" not in current_case:
-                        current_case["description"] = line
-                    else:
-                        current_case["description"] += "\n" + line
+            Format your response as follows:
+            Scenario: [Test Case Name]
+            Given [precondition]
+            When [action]
+            Then [expected result]
+            And [additional verification if needed]
+            """
 
-            # Add the last test case if there is one
-            if current_case:
-                processed_cases.append(current_case)
+            # Call the API
+            messages = [
+                {"role": "system", "content": "You are a QA automation expert specializing in test case generation."},
+                {"role": "user", "content": prompt}
+            ]
 
-            return processed_cases or [self._create_fallback_test_case()]
+            response_content = self.call_azure_openai(messages)
+
+            # Process the response to extract test cases
+            test_cases = self.extract_test_cases(response_content)
+
+            return test_cases if test_cases else [self._create_fallback_test_case()]
 
         except Exception as e:
-            logging.error(f"Error generating test cases: {e}")
+            logging.error(f"Error generating test cases with Azure OpenAI: {e}")
             return [self._create_fallback_test_case()]
 
-    def format_prompt(self, context_data):
-        """Format the input data into a prompt for the LLM.
+    def extract_test_cases(self, response_content):
+        """Extract test cases from the API response"""
+        test_cases = []
+        current_case = None
 
-        Args:
-            context_data (dict): Input data for generating test cases.
+        for line in response_content.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
 
-        Returns:
-            str: Formatted prompt.
-        """
-        requirements = context_data.get("requirements", [])
-        scenarios = context_data.get("scenarios", [])
-        additional_context = context_data.get("additional_context", "")
+            # Check if this is a new scenario
+            if line.startswith("Scenario:"):
+                if current_case:
+                    test_cases.append(current_case)
+                current_case = {"name": line[9:].strip(), "steps": [], "description": ""}
+            elif current_case and any(
+                    line.startswith(step_type) for step_type in ["Given", "When", "Then", "And", "But"]):
+                # This is a step
+                for step_type in ["Given", "When", "Then", "And", "But"]:
+                    if line.startswith(step_type):
+                        description = line[len(step_type):].strip()
+                        current_case["steps"].append({
+                            "type": step_type,
+                            "description": description
+                        })
+                        break
+            elif current_case:
+                # Additional info for the current case
+                if current_case["description"]:
+                    current_case["description"] += "\n" + line
+                else:
+                    current_case["description"] = line
 
-        prompt = "Generate test cases in Gherkin format based on the following requirements and scenarios:\n\n"
+        # Add the last test case
+        if current_case:
+            test_cases.append(current_case)
 
-        if requirements:
-            prompt += "Requirements:\n"
-            for idx, req in enumerate(requirements, 1):
-                prompt += f"{idx}. {req}\n"
-            prompt += "\n"
-
-        if scenarios:
-            prompt += "Scenarios:\n"
-            for idx, scenario in enumerate(scenarios, 1):
-                prompt += f"{idx}. {scenario}\n"
-            prompt += "\n"
-
-        if additional_context:
-            prompt += f"Additional Context:\n{additional_context}\n\n"
-
-        prompt += """For each test case, include:
-1. A descriptive name
-2. Gherkin steps (Given, When, Then, And)
-3. Make steps detailed and specific
-
-Format your response as follows:
-Scenario: [Test Case Name]
-Given [precondition]
-When [action]
-Then [expected result]
-And [additional verification if needed]
-"""
-        return prompt
+        return test_cases
 
     def _create_fallback_test_case(self):
         """Create a fallback test case when generation fails"""
