@@ -236,12 +236,24 @@ def main():
     # Generate traceability reports if requested
     if args.generate_reports and EXTENSIONS_AVAILABLE:
         try:
+            # Create a TestCaseGenerator to access story data
+            test_case_generator = TestCaseGenerator(args.story_folder, args.context_folder)
+            test_case_generator.load_source_data()
+            
+            # Extract scenarios from feature files
+            scenarios = []
+            for feature_file in feature_files:
+                for scenario in feature_file.scenarios:
+                    scenarios.append({
+                        "name": scenario.name,
+                        "steps": [{"description": step.description} for step in scenario.steps]
+                    })
+            
+            # Generate traceability matrix
             reporter = TraceabilityReporter(args.output_dir)
             traceability_matrix = reporter.generate_traceability_matrix(
-                # This would need proper adaptation to work with the actual framework
-                [{"name": scenario.name, "steps": [s.description for s in scenario.steps]}
-                 for scenario in framework.test_scenarios],
-                framework.story_data
+                scenarios,
+                test_case_generator.story_data
             )
             logger.info("Generated traceability reports")
         except Exception as e:

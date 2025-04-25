@@ -1,5 +1,5 @@
-@automated
 @story_based
+@automated
 Feature: story_based_feature
   Feature file for story_based test scenarios
 
