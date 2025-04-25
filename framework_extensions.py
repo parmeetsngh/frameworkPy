@@ -498,6 +498,9 @@ class LLMTestCaseGenerator:
         # Azure endpoint configuration
         self.api_url = "https://llm-test-automation.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-08-01-preview"
         self.headers = {"api-key": api_key, "Content-Type": "application/json"}
+        # Track stats for reporting
+        self.generated_scenarios_count = 0
+        self.generated_steps_count = 0
 
     def call_azure_openai(self, messages, max_retries=5, base_wait=2):
         """Call Azure OpenAI API with retry logic"""
@@ -654,4 +657,212 @@ class LLMTestCaseGenerator:
                 {"type": "When", "description": "the user performs an action"},
                 {"type": "Then", "description": "the system responds correctly"}
             ]
+        }
+
+    def generate_test_cases_only(self, context_data):
+        """Generate test cases without detailed steps (first stage of two-stage process)"""
+        try:
+            # Extract data from context_data
+            requirements = context_data.get("requirements", [])
+            scenarios = context_data.get("scenarios", [])
+            additional_context = context_data.get("additional_context", "")
+
+            # Customize the prompt for test cases only (without detailed steps)
+            prompt = f"""
+            Generate test cases in Gherkin format based on the following requirements and scenarios.
+            
+            Focus ONLY on creating meaningful test case titles and descriptions. DO NOT create detailed steps.
+            Use only placeholder steps (Given a setup, When an action occurs, Then a result is verified).
+            
+            The test steps will be created in a separate process, so focus on covering all test scenarios
+            and edge cases implied by the requirements.
+            
+            Each test case should:
+            1. Have a clear, descriptive name that explains what is being tested
+            2. Include appropriate tags to categorize the test
+            3. Include minimal placeholder steps (Given/When/Then) without details
+            4. Cover positive scenarios, negative scenarios, and edge cases
+            
+            Requirements:
+            {' '.join(requirements)}
+
+            Scenarios:
+            {' '.join(scenarios)}
+
+            Additional Context:
+            {additional_context}
+            
+            Format each test case as:
+            
+            @tag1 @tag2
+            Scenario: Descriptive test case name
+              Given a basic setup
+              When the primary action occurs
+              Then the expected result is verified
+            """
+
+            # Call the API
+            messages = [
+                {"role": "system", "content": "You are a QA automation expert specializing in test case generation."},
+                {"role": "user", "content": prompt}
+            ]
+
+            response_content = self.call_azure_openai(messages)
+            test_cases = self.extract_test_cases(response_content)
+            
+            # Add tags for better organization if not present
+            for case in test_cases:
+                if not case.get("tags"):
+                    case["tags"] = ["automated"]
+                
+                # Ensure steps have minimal placeholder steps
+                if not case.get("steps") or len(case.get("steps", [])) < 3:
+                    case["steps"] = [
+                        {"type": "Given", "description": "a basic setup"},
+                        {"type": "When", "description": "the action is performed"},
+                        {"type": "Then", "description": "the expected result is verified"}
+                    ]
+            
+            self.generated_scenarios_count = len(test_cases)
+            return test_cases if test_cases else [self._create_fallback_test_case()]
+
+        except Exception as e:
+            logging.error(f"Error generating test cases with Azure OpenAI: {e}")
+            return [self._create_fallback_test_case()]
+
+    def enhance_test_steps(self, test_cases, reference_data):
+        """Enhance existing test cases with detailed steps (second stage of two-stage process)"""
+        try:
+            enhanced_test_cases = []
+            total_steps = 0
+            
+            # Gather examples from reference data if available
+            example_steps = reference_data.get("example_steps", [])
+            design_context = reference_data.get("design_context", "")
+            data_examples = reference_data.get("data_examples", [])
+            
+            # Create example steps text for the prompt
+            example_steps_text = "\n".join(example_steps[:10]) if example_steps else ""
+            
+            # Process each test case
+            for test_case in test_cases:
+                # Format the original test case for the prompt
+                scenario_name = test_case["name"]
+                steps_text = ""
+                for step in test_case.get("steps", []):
+                    steps_text += f"{step['type']} {step['description']}\n"
+                
+                # Customize prompt for step enhancement
+                prompt = f"""
+                Enhance the following test case with detailed, specific test steps.
+                
+                The original test case has generic placeholder steps. Your task is to replace these
+                with specific, actionable steps that a tester could follow precisely.
+                
+                TEST CASE:
+                Scenario: {scenario_name}
+                {steps_text}
+                
+                REFERENCE STEP EXAMPLES:
+                {example_steps_text}
+                
+                DESIGN CONTEXT:
+                {design_context[:2000]}
+                
+                DATA EXAMPLES:
+                {', '.join(data_examples[:3])}
+                
+                Please provide detailed steps for this test case, following the same Gherkin format but with specific actions and verifications.
+                Format your response as follows:
+                Given [specific precondition with exact values or objects]
+                When [specific action with exact parameters]
+                Then [specific verification with expected results]
+                """
+                
+                # Call the API
+                messages = [
+                    {"role": "system", "content": "You are a QA automation expert specializing in test step creation."},
+                    {"role": "user", "content": prompt}
+                ]
+                
+                response_content = self.call_azure_openai(messages)
+                
+                # Extract the enhanced steps
+                enhanced_steps = []
+                for line in response_content.strip().split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Check if this is a step line
+                    for step_type in ["Given", "When", "Then", "And", "But"]:
+                        if line.startswith(step_type):
+                            description = line[len(step_type):].strip()
+                            
+                            # Check if there's a data reference in JSON format
+                            data_reference = None
+                            json_match = re.search(r'(\{.*\})', description)
+                            if json_match:
+                                try:
+                                    # Try to parse as JSON
+                                    json_str = json_match.group(1)
+                                    json.loads(json_str)  # Just to validate
+                                    # Remove from description and store separately
+                                    description = description.replace(json_str, "").strip()
+                                    data_reference = json_str
+                                except json.JSONDecodeError:
+                                    # Not valid JSON, leave in description
+                                    pass
+                            
+                            enhanced_steps.append({
+                                "type": step_type,
+                                "description": description,
+                                "data_reference": data_reference
+                            })
+                            break
+                
+                # If no steps could be extracted, use the original placeholder steps
+                if not enhanced_steps and test_case.get("steps"):
+                    enhanced_steps = test_case["steps"]
+                
+                # Create the enhanced test case
+                enhanced_test_case = test_case.copy()
+                enhanced_test_case["steps"] = enhanced_steps
+                
+                # Track the number of steps
+                total_steps += len(enhanced_steps)
+                
+                enhanced_test_cases.append(enhanced_test_case)
+            
+            self.generated_steps_count = total_steps
+            return enhanced_test_cases
+            
+        except Exception as e:
+            logging.error(f"Error enhancing test steps with Azure OpenAI: {e}")
+            return test_cases  # Return the original test cases on error
+            
+    def generate_two_stage_test_cases(self, context_data, reference_data=None):
+        """Generate test cases using a two-stage process for better quality"""
+        # Stage 1: Generate test cases with placeholder steps
+        test_cases = self.generate_test_cases_only(context_data)
+        
+        # If reference data is not provided, use empty defaults
+        if not reference_data:
+            reference_data = {
+                "example_steps": [],
+                "design_context": "",
+                "data_examples": []
+            }
+        
+        # Stage 2: Enhance test cases with detailed steps
+        enhanced_test_cases = self.enhance_test_steps(test_cases, reference_data)
+        
+        return enhanced_test_cases
+    
+    def generate_report(self):
+        """Generate a report of the test generation statistics"""
+        return {
+            "generated_scenarios": self.generated_scenarios_count,
+            "generated_steps": self.generated_steps_count,
+            "average_steps_per_scenario": self.generated_steps_count / self.generated_scenarios_count if self.generated_scenarios_count > 0 else 0
         }

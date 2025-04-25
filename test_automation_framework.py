@@ -48,6 +48,170 @@ class FeatureFile:
     description: str
     scenarios: List[TestScenario] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    
+    def add_scenario(self, scenario: TestScenario):
+        """Add a test scenario to this feature file"""
+        self.scenarios.append(scenario)
+        return self
+    
+    def add_tag(self, tag: str):
+        """Add a tag to this feature file"""
+        if tag not in self.tags:
+            self.tags.append(tag)
+        return self
+    
+    def get_total_steps_count(self) -> int:
+        """Get the total number of steps across all scenarios"""
+        return sum(len(scenario.steps) for scenario in self.scenarios)
+    
+    def get_scenarios_by_tag(self, tag: str) -> List[TestScenario]:
+        """Get all scenarios that have the specified tag"""
+        return [scenario for scenario in self.scenarios if tag in scenario.tags]
+    
+    def to_dict(self) -> Dict:
+        """Convert the feature file to a dictionary representation"""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "tags": self.tags,
+            "scenarios": [
+                {
+                    "name": scenario.name,
+                    "tags": scenario.tags,
+                    "steps": [
+                        {
+                            "type": step.step_type,
+                            "description": step.description,
+                            "data_reference": step.data_reference
+                        } for step in scenario.steps
+                    ],
+                    "source_references": [
+                        {
+                            "source_type": ref.source_type,
+                            "link": ref.link,
+                            "document_name": ref.document_name,
+                            "section": ref.section
+                        } for ref in scenario.source_references
+                    ]
+                } for scenario in self.scenarios
+            ]
+        }
+    
+    def to_gherkin(self) -> str:
+        """Convert the feature file to a Gherkin string representation"""
+        lines = []
+        
+        # Write feature tags
+        for tag in self.tags:
+            lines.append(f"@{tag}")
+        
+        # Write feature header
+        lines.append(f"Feature: {self.name}")
+        lines.append(f"  {self.description}")
+        lines.append("")
+        
+        # Write each scenario
+        for scenario in self.scenarios:
+            # Write scenario tags
+            for tag in scenario.tags:
+                if tag not in self.tags:  # Avoid duplicate tags
+                    lines.append(f"  @{tag}")
+            
+            # Write scenario header
+            lines.append(f"  Scenario: {scenario.name}")
+            
+            # Write scenario steps
+            for step in scenario.steps:
+                data_ref = f" {step.data_reference}" if step.data_reference else ""
+                lines.append(f"    {step.step_type} {step.description}{data_ref}")
+            
+            # Add a blank line between scenarios
+            lines.append("")
+        
+        return "\n".join(lines)
+    
+    def save_to_file(self, output_dir: str) -> str:
+        """Save the feature file to disk and return the file path"""
+        output_path = os.path.join(output_dir, f"{self.name}.feature")
+        
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(self.to_gherkin())
+            return output_path
+        except Exception as e:
+            logger.error(f"Error writing feature file {output_path}: {e}")
+            return None
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'FeatureFile':
+        """Create a FeatureFile object from a dictionary representation"""
+        feature_file = cls(
+            name=data.get("name", ""),
+            description=data.get("description", ""),
+            tags=data.get("tags", [])
+        )
+        
+        for scenario_data in data.get("scenarios", []):
+            scenario = TestScenario(
+                name=scenario_data.get("name", ""),
+                tags=scenario_data.get("tags", [])
+            )
+            
+            # Add steps
+            for step_data in scenario_data.get("steps", []):
+                step = TestStep(
+                    step_type=step_data.get("type", "Given"),
+                    description=step_data.get("description", ""),
+                    data_reference=step_data.get("data_reference")
+                )
+                scenario.steps.append(step)
+            
+            # Add source references
+            for ref_data in scenario_data.get("source_references", []):
+                source_ref = SourceReference(
+                    source_type=ref_data.get("source_type", ""),
+                    link=ref_data.get("link", ""),
+                    document_name=ref_data.get("document_name"),
+                    section=ref_data.get("section")
+                )
+                scenario.source_references.append(source_ref)
+            
+            # Add the scenario to the feature file
+            feature_file.add_scenario(scenario)
+        
+        return feature_file
+    
+    @classmethod
+    def from_file(cls, file_path: str) -> 'FeatureFile':
+        """Create a FeatureFile object by parsing an existing feature file"""
+        parser = FeatureFileParser()
+        feature_data = parser.parse(file_path)
+        
+        feature_file = cls(
+            name=feature_data.get("feature_name") or Path(file_path).stem,
+            description=feature_data.get("description", ""),
+            tags=feature_data.get("tags", [])
+        )
+        
+        # Add scenarios
+        for scenario_data in feature_data.get("scenarios", []):
+            scenario = TestScenario(
+                name=scenario_data.get("name", ""),
+                tags=scenario_data.get("tags", [])
+            )
+            
+            # Add steps
+            for step_data in scenario_data.get("steps", []):
+                step = TestStep(
+                    step_type=step_data.get("type", "Given"),
+                    description=step_data.get("description", "")
+                )
+                scenario.steps.append(step)
+            
+            # Add the scenario to the feature file
+            feature_file.add_scenario(scenario)
+        
+        return feature_file
 
 
 class DocumentParser:
@@ -544,29 +708,180 @@ class TestAutomationFramework:
         self.story_folder = story_folder
         self.context_folder = context_folder
         self.output_dir = output_dir
+        
+        # Additional attributes for enhanced functionality
+        self.test_case_generator = None
+        self.test_step_generator = None
+        self.formatter = GherkinFormatter()
+        self.llm_generator = None
+        self.nlp_generator = None
+        
+        # Optional trackers for progress reporting
+        self.total_scenarios = 0
+        self.total_steps = 0
+        self.feature_files = []
 
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
+    
+    def initialize_generators(self):
+        """Initialize the test case and step generators"""
+        # Initialize test case generator
+        self.test_case_generator = TestCaseGenerator(self.story_folder, self.context_folder)
+        self.test_case_generator.load_source_data()
+        
+        # Return the generators for API access if needed
+        return self.test_case_generator
 
-    def generate_test_cases(self):
+    def generate_test_cases(self, use_enhanced_steps=True):
         """Generate test cases and test steps from source data"""
         logger.info("Starting test case generation...")
-
-        # Step 1: Generate test cases from source data
-        test_case_generator = TestCaseGenerator(self.story_folder, self.context_folder)
-        test_case_generator.load_source_data()
-        test_scenarios = test_case_generator.generate_test_cases()
-
-        # Step 2: Generate test steps for each test case
-        test_step_generator = TestStepGenerator(test_scenarios, test_case_generator.context_data)
-        test_step_generator.enhance_test_steps()
-
-        # Step 3: Format test cases and steps into Gherkin feature files
-        formatter = GherkinFormatter()
-        feature_files = formatter.create_feature_files(test_scenarios, self.output_dir)
-
-        logger.info(f"Test case generation complete. Generated {len(feature_files)} feature files.")
-        return feature_files
+        
+        # Initialize generators if they haven't been initialized
+        if not self.test_case_generator:
+            self.initialize_generators()
+        
+        # Generate test scenarios from source data
+        test_scenarios = self.test_case_generator.generate_test_cases()
+        self.total_scenarios = len(test_scenarios)
+        
+        # Generate test steps for each test case if requested
+        if use_enhanced_steps:
+            self.test_step_generator = TestStepGenerator(test_scenarios, self.test_case_generator.context_data)
+            self.test_step_generator.enhance_test_steps()
+        
+        # Format and output the feature files
+        self.feature_files = self.formatter.create_feature_files(test_scenarios, self.output_dir)
+        
+        # Track total steps for reporting
+        self.total_steps = sum(len(scenario.steps) for feature in self.feature_files
+                              for scenario in feature.scenarios)
+        
+        logger.info(f"Test case generation complete. Generated {len(self.feature_files)} feature files with {self.total_scenarios} scenarios and {self.total_steps} steps.")
+        return self.feature_files
+    
+    def generate_test_cases_only(self):
+        """Generate test cases without detailed steps (first stage of two-stage process)"""
+        logger.info("Starting test case generation (first stage)...")
+        
+        # Initialize generators if they haven't been initialized
+        if not self.test_case_generator:
+            self.initialize_generators()
+        
+        # Generate test scenarios with minimal steps
+        test_scenarios = self.test_case_generator.generate_test_cases()
+        
+        # Apply minimal placeholder steps to scenarios without steps
+        for scenario in test_scenarios:
+            if not scenario.steps:
+                # Add minimal placeholder steps
+                scenario.steps.append(TestStep(step_type="Given", description="a basic setup"))
+                scenario.steps.append(TestStep(step_type="When", description="the action is performed"))
+                scenario.steps.append(TestStep(step_type="Then", description="the expected result is verified"))
+        
+        # Format and output the feature files
+        self.feature_files = self.formatter.create_feature_files(test_scenarios, self.output_dir)
+        
+        logger.info(f"First stage complete. Generated {len(self.feature_files)} feature files with {len(test_scenarios)} test cases.")
+        return self.feature_files
+    
+    def enhance_test_steps(self, feature_files_path):
+        """Enhance existing test cases with detailed steps (second stage of two-stage process)"""
+        logger.info("Starting test step enhancement (second stage)...")
+        
+        # Parse existing feature files
+        parser = FeatureFileParser()
+        enhanced_feature_files = []
+        
+        # Find all feature files in the specified directory
+        feature_file_paths = []
+        if os.path.isdir(feature_files_path):
+            for file in os.listdir(feature_files_path):
+                if file.endswith('.feature'):
+                    feature_file_paths.append(os.path.join(feature_files_path, file))
+        else:
+            feature_file_paths = [feature_files_path]
+        
+        # Initialize context data if not already done
+        if not self.test_case_generator:
+            self.initialize_generators()
+            
+        context_data = self.test_case_generator.context_data
+        
+        # Process each feature file
+        for file_path in feature_file_paths:
+            feature_data = parser.parse(file_path)
+            
+            # Create scenarios from parsed data
+            scenarios = []
+            for scenario_data in feature_data.get('scenarios', []):
+                scenario = TestScenario(
+                    name=scenario_data['name'],
+                    tags=scenario_data.get('tags', [])
+                )
+                
+                # Convert steps
+                steps = []
+                for step_data in scenario_data.get('steps', []):
+                    steps.append(TestStep(
+                        step_type=step_data['type'],
+                        description=step_data['description']
+                    ))
+                
+                scenario.steps = steps
+                scenarios.append(scenario)
+            
+            # Enhance the steps
+            self.test_step_generator = TestStepGenerator(scenarios, context_data)
+            self.test_step_generator.enhance_test_steps()
+            
+            # Create feature file
+            feature_file = FeatureFile(
+                name=feature_data.get('feature_name') or Path(file_path).stem,
+                description=feature_data.get('description') or f"Feature file for {Path(file_path).stem}",
+                scenarios=scenarios,
+                tags=feature_data.get('tags', [])
+            )
+            
+            # Write enhanced feature file
+            enhanced_path = os.path.join(self.output_dir, os.path.basename(file_path))
+            self.formatter._write_feature_file(feature_file, self.output_dir)
+            
+            enhanced_feature_files.append(feature_file)
+        
+        logger.info(f"Second stage complete. Enhanced {len(enhanced_feature_files)} feature files.")
+        return enhanced_feature_files
+    
+    def set_llm_generator(self, llm_generator):
+        """Set an LLM generator for enhanced test generation"""
+        self.llm_generator = llm_generator
+        return self
+    
+    def set_nlp_generator(self, nlp_generator):
+        """Set an NLP generator for enhanced test generation"""
+        self.nlp_generator = nlp_generator
+        return self
+    
+    def generate_report(self):
+        """Generate a report of the test generation statistics"""
+        if not self.feature_files:
+            return "No test cases have been generated yet."
+        
+        report = "=== Test Generation Report ===\n"
+        report += f"Total feature files: {len(self.feature_files)}\n"
+        report += f"Total test scenarios: {self.total_scenarios}\n"
+        report += f"Total test steps: {self.total_steps}\n\n"
+        
+        # Feature files breakdown
+        report += "Feature Files:\n"
+        for i, feature in enumerate(self.feature_files, 1):
+            scenarios_count = len(feature.scenarios)
+            steps_count = sum(len(scenario.steps) for scenario in feature.scenarios)
+            report += f"  {i}. {feature.name}: {scenarios_count} scenarios, {steps_count} steps\n"
+        
+        report += "\nOutput directory: " + self.output_dir
+        
+        return report
 
 
 def main():

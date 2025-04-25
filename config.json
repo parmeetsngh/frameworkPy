@@ -1,7 +1,47 @@
 {
-  "use_enhanced_parsers": true,
-  "nlp_settings": {
-    "model": "en_core_web_sm",
-    "min_confidence": 0.7
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "console_format": "%(levelname)s: %(message)s"
+  },
+  "llm": {
+    "enabled": true,
+    "provider": "azure",
+    "model": "gpt-4o",
+    "temperature": 0.4,
+    "api_version": "2024-08-01-preview",
+    "azure_endpoint": "https://llm-test-automation.openai.azure.com/openai/deployments/gpt-4o/chat/completions",
+    "timeout": 60,
+    "max_retries": 3
+  },
+  "nlp": {
+    "enabled": false,
+    "library": "spacy",
+    "model": "en_core_web_sm"
+  },
+  "test_generation": {
+    "default_tags": ["automated", "generated"],
+    "common_given_steps": [
+      "the application is running",
+      "the user is logged in",
+      "the database is initialized"
+    ],
+    "max_scenarios_per_feature": 10,
+    "group_by_tags": true,
+    "two_stage_generation": true
+  },
+  "directories": {
+    "output_root": "output",
+    "log_dir": "logs",
+    "temp_dir": "temp",
+    "features_dir": "output/features",
+    "reports_dir": "output/reports"
+  },
+  "feature_format": {
+    "indent_spaces": 2,
+    "new_line_after_feature": true,
+    "new_line_after_scenario": true,
+    "tag_on_new_line": false
   }
 }

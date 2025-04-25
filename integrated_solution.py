@@ -22,7 +22,8 @@ from test_automation_framework import (
     InputTxtParser,
     DocxParser,
     FeatureFileParser,
-    ExcelParser
+    ExcelParser,
+    TestCaseGenerator
 )
 
 # Import extended components
